@@ -8,6 +8,7 @@ import re
 import json
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+#need to handle available from and also ignore events that arent well formed so it can post anyway
 # -----------------------------
 # pydanitc Models
 # -----------------------------
@@ -256,13 +257,13 @@ def postprocess_json(generated_json: str, raw_text: str = ""):
     Normalize model JSON output:
     - Ensure due_date is YYYY-MM-DD
     - Ensure time is HH:MM (24h) if present
-    - Ignore dates/times from 'Not available' sections
+    - Ignore dates/times from 'Not available' and 'Available until" sections
     """
     data = json.loads(generated_json)
 
     for item in data:
         # If the assignment text contains "Not available", drop its date/time
-        if "assignment" in item and "not available" in item["assignment"].lower():
+        if "assignment" in item and ("not available" in item["assignment"].lower() and "available until" not in item["assignment"].lower()):
             item.pop("due_date", None)
             item.pop("time", None)
             continue
