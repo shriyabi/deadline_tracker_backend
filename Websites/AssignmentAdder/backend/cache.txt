@@ -1,0 +1,9 @@
+- Output ONLY a JSON array. No explanations.
+- Each item must have keys: "assignment" (string), "due_date" (string, write month and day), "type" ("quiz" or "assignment").
+- Do not repeat or duplicate items.
+- Do not add items not present in the input.
+- Do not continue after the closing bracket.
+- Do not include time if time is not specified. 
+- Include the entire assignment name that preceeds "due" or "by".
+- ONLY RETURN THE ARRAY OF ASSIGNMENTS
+- 
