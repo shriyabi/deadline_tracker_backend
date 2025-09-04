@@ -81,7 +81,8 @@ def mark_time_tokens(text: str):
     - Handles cases where SpaCy splits DATE and TIME separately.
     """
     # split by assignment blocks (assuming each starts with '<ASSIGNMENT>' or similar)
-    blocks = re.split(r'(?=Assignment\b)', text)
+    blocks = re.split(r'(?:Assignment|Quiz)\b', text)
+
     marked_blocks = []
     for block in blocks:
         if not block.strip():
@@ -154,43 +155,55 @@ def mark_tags(text: str):
     - <IGNORE>...</IGNORE> for 'Not available' lines and grading lines
     - <DUE><DATE>...</DATE> <TIME>...</TIME></DUE> for due dates/times
     """
-    blocks = re.split(r'(?=Assignment\b)', text)
-    marked_blocks = []
+    def inside_tag(text, start, end, tag):
+        pattern = fr"<{tag}>(.*?)</{tag}>"
+        for m in re.finditer(pattern, text, flags=re.DOTALL):
+            if m.start(1) <= start and end <= m.end(1):
+                return True
+        return False
 
+   #blocks = re.split(r'(?=Assignment\b)', text)
+    blocks = re.split(r'(?=(Assignment|Quiz)\b)', text)
+    #blocks = re.split(r'(?:Assignment|Quiz)\b', text)
+    marked_blocks = []
     for block in blocks:
+        print("Block:", block)
         if not block.strip():
             continue
-
+        if block.strip() in ["Assignment", "Quiz"]:
+            continue
         lines = block.split("\n")
-
         # Step 1: mark "Not available" and grading/points lines
         for i, line in enumerate(lines):
-            if ("not available" in line.lower()) or ("points possible" in line.lower()) or ("no submission" in line.lower()):
+            if ("not available" in line.lower()) or ("points possible" in line.lower()) or ("no submission" in line.lower()) or ("available until" in line.lower()):
                 lines[i] = f"<IGNORE>{line}</IGNORE>"
-
+        #Step 1.5: remove lines that are exactly "Assignment" or "Quiz"
+        for i, line in enumerate(lines):
+            if re.fullmatch(r'\s*(Assignment|Quiz)\s*', line, flags=re.IGNORECASE):
+                lines[i] = ""   # delete only if the line is exactly "Assignment" or "Quiz"
         # Step 2: wrap assignment name (first non-empty line not ignored)
         for i, line in enumerate(lines):
-            if line.strip() and not line.lower().startswith("assignment") and "<IGNORE>" not in line:
+            if line.strip() and not ((line == "Assignment") or (line == "Quiz") or line.lower().startswith("due")) and "<IGNORE>" not in line:
+                print("170", line)
                 lines[i] = f"<ASSIGNMENT_NAME>{line.strip()}</ASSIGNMENT_NAME>"
                 break
-
         block_text = "\n".join(lines)
-
         # Step 3: spaCy DATE/TIME entities
         doc = nlp_token_extractor(block_text)
         ents = list(doc.ents)
-
         merged = []
         skip_next = False
         for i, ent in enumerate(ents):
             if skip_next:
                 skip_next = False
                 continue
-
-            # Skip entities inside <IGNORE>
-            if re.search(r"<IGNORE>.*?</IGNORE>", block_text[ent.start_char:ent.end_char]):
-                continue
-
+            # Skip entities inside <IGNORE> and <ASSIGNMENT_NAME>
+            print("Checking entity:", ent.text, ent.label_, "in text:", block_text[ent.start_char:ent.end_char])
+            print("block text:", block_text)
+            if inside_tag(block_text, ent.start_char, ent.end_char, "IGNORE") \
+                or inside_tag(block_text, ent.start_char, ent.end_char, "ASSIGNMENT_NAME"):
+                print("Skipping entity inside IGNORE or ASSIGNMENT_NAME:", ent.text)
+            continue
             # Merge DATE + TIME
             if ent.label_ == "DATE" and i + 1 < len(ents) and ents[i+1].label_ == "TIME":
                 merged.append({
@@ -205,7 +218,6 @@ def mark_tags(text: str):
                     "start": ent.start_char,
                     "end": ent.end_char
                 })
-
         # Step 4: replace spaCy entities and wrap in <DUE>
         marked_block = block_text
         offset = 0
@@ -223,7 +235,6 @@ def mark_tags(text: str):
             replacement = "<DUE>" + " ".join(parts) + "</DUE>"
             marked_block = marked_block[:start] + replacement + marked_block[end:]
             offset += len(replacement) - (end - start)
-
         # Step 5: regex safeguard for anything SpaCy missed
         def regex_replace_due(match):
             d, t = normalize_time(match.group(0))
@@ -235,16 +246,13 @@ def mark_tags(text: str):
             if t:
                 parts.append(f"<TIME>{t}</TIME>")
             return "<DUE>" + " ".join(parts) + "</DUE>"
-
         marked_block = re.sub(
             r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}(?: at \d{1,2}:\d{2}\s?(?:am|pm))?\b',
             regex_replace_due,
             marked_block,
             flags=re.IGNORECASE
         )
-
         marked_blocks.append(f"<ASSIGNMENT>{marked_block}</ASSIGNMENT>")
-
     return "\n".join(marked_blocks)
 
 import re
@@ -379,11 +387,11 @@ def createMessages(assignments_input: str):
         {
             "role": "user",
             "content": f"""
-            You are an assistant that extracts assignments and their due dates and times from structured text marked with <ASSIGNMENT> tags. 
+            You are an assistant that extracts assignments and their due dates and times from structured text marked with <ASSIGNMENT> tags. MAKE SURE TO GO THROUGH ALL <ASSIGNMENT>...</ASSIGNMENT> BLOCKS.  
 
 Rules:
 - Each assignment is enclosed in <ASSIGNMENT>...</ASSIGNMENT>.
-- The assignment title is within <ASSIGNMENT_NAME>...</ASSIGNMENT_NAME>.
+- The assignment title is within <ASSIGNMENT_NAME>...</ASSIGNMENT_NAME> but ignore any <DUE>..</DUE> tags within.
 - The due date is within <DUE><DATE>...</DATE></DUE>.
 - The due time, if present, is within <DUE><TIME>...</TIME></DUE> or in the <TIME> tag inside <DUE>.
 - Ignore any text outside <ASSIGNMENT> blocks.
@@ -391,7 +399,7 @@ Rules:
 Output format:
 - JSON array of objects.
 - Each object should have:
-  - "assignment" (string) — the assignment name
+  - "assignment" (string) — the assignment name inside the <ASSIGNMENT_NAME>...</ASSIGNMENT_NAME> tags
   - "due_date" (string, YYYY-MM-DD format)
   - "time" (string, 24-hour format HH:MM, or null if not provided)
             
@@ -465,9 +473,94 @@ Due Dec 8 at 11:59pm Dec 8 at 11:59pm
 -/32 pts
 """
 
+
+# assignments = """
+# Quiz
+# Quiz #1: Syllabus and Basics 
+# Not available until Sep 4 at 5pm Sep 4 at 5pm
+# Due Sep 8 at 11:59pm Sep 8 at 11:59pm
+# -/20 ptsNo submission for this assignment. 20 points possible.
+# Assignment
+# HW1: Encode and decode messages 
+# Available until Sep 15 at 11:59pm Sep 15 at 11:59pm
+# Due Sep 11 at 11:59pm Sep 11 at 11:59pm
+# -/50 ptsNo submission for this assignment. 50 points possible.
+# Assignment
+# HW2: Invent two new image filters and build a collage 
+# Not available until Sep 9 at 5pm Sep 9 at 5pm
+# Due Sep 18 at 11:59pm Sep 18 at 11:59pm
+# -/60 ptsNo submission for this assignment. 60 points possible.
+# Quiz
+# Quiz #2: Images 
+# Not available until Sep 16 at 5pm Sep 16 at 5pm
+# Due Sep 20 at 11:59pm Sep 20 at 11:59pm
+# -/20 ptsNo submission for this assignment. 20 points possible.
+# Quiz
+# Quiz #3: Copying and Transforming Pictures 
+# Not available until Sep 25 at 5pm Sep 25 at 5pm
+# Due Sep 28 at 11:59pm Sep 28 at 11:59pm
+# -/20 ptsNo submission for this assignment. 20 points possible.
+# Assignment
+# Project 1: Build an image collage 
+# Not available until Sep 16 at 10am Sep 16 at 10am
+# Due Oct 7 at 11:59pm Oct 7 at 11:59pm
+# -/55 ptsNo submission for this assignment. 55 points possible.
+# Quiz
+# Quiz #4: Sound Basics 
+# Not available until Oct 9 at 5pm Oct 9 at 5pm
+# Due Oct 12 at 11:59pm 
+# """
+
+assignments2 = """
+Quiz #1: Syllabus and Basics 
+Not available until Sep 4 at 5pm Sep 4 at 5pm
+Due Sep 8 at 11:59pm Sep 8 at 11:59pm
+-/20 ptsNo submission for this assignment. 20 points possible.
+Assignment
+HW1: Encode and decode messages 
+Available until Sep 15 at 11:59pm Sep 15 at 11:59pm
+Due Sep 11 at 11:59pm Sep 11 at 11:59pm
+-/50 ptsNo submission for this assignment. 50 points possible.
+Assignment
+HW2: Invent two new image filters and build a collage 
+Not available until Sep 9 at 5pm Sep 9 at 5pm
+Due Sep 18 at 11:59pm Sep 18 at 11:59pm
+-/60 ptsNo submission for this assignment. 60 points possible.
+Quiz
+Quiz #2: Images 
+Not available until Sep 16 at 5pm Sep 16 at 5pm
+Due Sep 20 at 11:59pm Sep 20 at 11:59pm
+-/20 ptsNo submission for this assignment. 20 points possible.
+Quiz
+Quiz #3: Copying and Transforming Pictures 
+Not available until Sep 25 at 5pm Sep 25 at 5pm
+Due Sep 28 at 11:59pm Sep 28 at 11:59pm
+-/20 ptsNo submission for this assignment. 20 points possible.
+Assignment
+Project 1: Build an image collage 
+Not available until Sep 16 at 10am Sep 16 at 10am
+Due Oct 7 at 11:59pm Oct 7 at 11:59pm
+-/55 ptsNo submission for this assignment. 55 points possible.
+Quiz
+Quiz #4: Sound Basics 
+Not available until Oct 9 at 5pm Oct 9 at 5pm
+Due Oct 12 at 11:59pm Oct 12 at 11:59pm
+-/20 ptsNo submission for this assignment. 20 points possible.
+Assignment
+HW3: Create two sound filters 
+Not available until Oct 7 at 12am Oct 7 at 12am
+Due Oct 21 at 11:59pm Oct 21 at 11:59pm
+-/50 ptsNo submission for this assignment. 50 points possible.
+Quiz
+Quiz #5: Advanced Sound 
+Not available until Oct 30 at 5pm Oct 30 at 5pm
+Due Nov 2 at 11:59pm Nov 2 at 11:59pm
+-/20 pts
+"""
+
 # clean input 
 print("Extracted time tokens:", extract_time_token_entities(assignments))
-marked_assignments = mark_tags(assignments)
+marked_assignments = mark_tags(assignments2)
 print("Marked text:", marked_assignments)
 cleaned_assignments = clean_all_assignment_blocks(remove_ignore_lines(marked_assignments))
 print("Cleaned text:", cleaned_assignments)
@@ -484,7 +577,7 @@ inputs = tokenizer.apply_chat_template(
 ).to(model.device)
 outputs = model.generate(
     **inputs,
-    max_new_tokens=750,
+    max_new_tokens=1250,
     do_sample=False,
     temperature=0.7,
     top_p=0.9,
@@ -510,37 +603,3 @@ def postprocessss_json(generated_json: str):
 
 cleaned = postprocess_json(generated_text)
 print("Final output:", cleaned)
-
-
-# -----------------------------
-# FastAPI Endpoint
-# -----------------------------
-@app.post("/extract-assignments", response_model=Assignments)
-def extract_assignments(req: ExtractRequest):
-    # Step 1: mark, remove ignored lines, clean <DUE>
-    marked = mark_tags(req.text)
-    cleaned = clean_all_assignment_blocks(remove_ignore_lines(marked))
-    # Step 2: create prompt
-    messages = createMessages(cleaned)
-    inputs = tokenizer.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt"
-    ).to(model.device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=750,
-        do_sample=False,
-        temperature=0.7,
-        top_p=0.9,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.eos_token_id
-    )
-    generated_text = tokenizer.decode(outputs[0][inputs['input_ids'].shape[-1]:])
-    # Step 3: parse JSON
-    assignments_list = postprocess_json(generated_text)
-    return {"assignments": assignments_list}
-
-

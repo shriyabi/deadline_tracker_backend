@@ -97,19 +97,36 @@ def mark_tags(text: str):
     - <IGNORE>...</IGNORE> for 'Not available' lines and grading lines
     - <DUE><DATE>...</DATE> <TIME>...</TIME></DUE> for due dates/times
     """
-    blocks = re.split(r'(?=Assignment\b)', text)
+    def inside_tag(text, start, end, tag):
+        pattern = fr"<{tag}>(.*?)</{tag}>"
+        for m in re.finditer(pattern, text, flags=re.DOTALL):
+            if m.start(1) <= start and end <= m.end(1):
+                return True
+        return False
+
+   #blocks = re.split(r'(?=Assignment\b)', text)
+    blocks = re.split(r'(?=(Assignment|Quiz)\b)', text)
+    #blocks = re.split(r'(?:Assignment|Quiz)\b', text)
     marked_blocks = []
     for block in blocks:
+        print("Block:", block)
         if not block.strip():
+            continue
+        if block.strip() in ["Assignment", "Quiz"]:
             continue
         lines = block.split("\n")
         # Step 1: mark "Not available" and grading/points lines
         for i, line in enumerate(lines):
-            if ("not available" in line.lower()) or ("points possible" in line.lower()) or ("no submission" in line.lower()):
+            if ("not available" in line.lower()) or ("points possible" in line.lower()) or ("no submission" in line.lower()) or ("available until" in line.lower()):
                 lines[i] = f"<IGNORE>{line}</IGNORE>"
+        #Step 1.5: remove lines that are exactly "Assignment" or "Quiz"
+        for i, line in enumerate(lines):
+            if re.fullmatch(r'\s*(Assignment|Quiz)\s*', line, flags=re.IGNORECASE):
+                lines[i] = ""   # delete only if the line is exactly "Assignment" or "Quiz"
         # Step 2: wrap assignment name (first non-empty line not ignored)
         for i, line in enumerate(lines):
-            if line.strip() and not line.lower().startswith("assignment") and "<IGNORE>" not in line:
+            if line.strip() and not ((line == "Assignment") or (line == "Quiz") or line.lower().startswith("due")) and "<IGNORE>" not in line:
+                print("170", line)
                 lines[i] = f"<ASSIGNMENT_NAME>{line.strip()}</ASSIGNMENT_NAME>"
                 break
         block_text = "\n".join(lines)
@@ -122,9 +139,11 @@ def mark_tags(text: str):
             if skip_next:
                 skip_next = False
                 continue
-            # Skip entities inside <IGNORE>
-            if re.search(r"<IGNORE>.*?</IGNORE>", block_text[ent.start_char:ent.end_char]):
-                continue
+            # Skip entities inside <IGNORE> and <ASSIGNMENT_NAME>
+            if inside_tag(block_text, ent.start_char, ent.end_char, "IGNORE") \
+                or inside_tag(block_text, ent.start_char, ent.end_char, "ASSIGNMENT_NAME"):
+                print("Skipping entity inside IGNORE or ASSIGNMENT_NAME:", ent.text)
+            continue
             # Merge DATE + TIME
             if ent.label_ == "DATE" and i + 1 < len(ents) and ents[i+1].label_ == "TIME":
                 merged.append({
@@ -177,16 +196,17 @@ def mark_tags(text: str):
     return "\n".join(marked_blocks)
 
 # build prompt
+# For prompt building
 def createMessages(assignments_input: str):
     return [
         {
             "role": "user",
             "content": f"""
-            You are an assistant that extracts assignments and their due dates and times from structured text marked with <ASSIGNMENT> tags. 
+            You are an assistant that extracts assignments and their due dates and times from structured text marked with <ASSIGNMENT> tags. MAKE SURE TO GO THROUGH ALL <ASSIGNMENT>...</ASSIGNMENT> BLOCKS.  
 
 Rules:
 - Each assignment is enclosed in <ASSIGNMENT>...</ASSIGNMENT>.
-- The assignment title is within <ASSIGNMENT_NAME>...</ASSIGNMENT_NAME>.
+- The assignment title is within <ASSIGNMENT_NAME>...</ASSIGNMENT_NAME> but ignore any <DUE>..</DUE> tags within.
 - The due date is within <DUE><DATE>...</DATE></DUE>.
 - The due time, if present, is within <DUE><TIME>...</TIME></DUE> or in the <TIME> tag inside <DUE>.
 - Ignore any text outside <ASSIGNMENT> blocks.
@@ -194,7 +214,7 @@ Rules:
 Output format:
 - JSON array of objects.
 - Each object should have:
-  - "assignment" (string) — the assignment name
+  - "assignment" (string) — the assignment name inside the <ASSIGNMENT_NAME>...</ASSIGNMENT_NAME> tags
   - "due_date" (string, YYYY-MM-DD format)
   - "time" (string, 24-hour format HH:MM, or null if not provided)
             
@@ -262,8 +282,8 @@ def postprocess_json(generated_json: str, raw_text: str = ""):
     data = json.loads(generated_json)
 
     for item in data:
-        # If the assignment text contains "Not available", drop its date/time
-        if "assignment" in item and ("not available" in item["assignment"].lower() and "available until" not in item["assignment"].lower()):
+        # If the assignment or quiz text contains "Not available", drop its date/time
+        if ("assignment" in item or "quiz" in item) and ("not available" in item["assignment"].lower() or "available until" in item["assignment"].lower()):
             item.pop("due_date", None)
             item.pop("time", None)
             continue
